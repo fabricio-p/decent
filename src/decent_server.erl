@@ -16,6 +16,8 @@
 -record(state, {contacts = [], port = 0, socket = nil}).
 -define(PORT, 16#fab).
 
+%% INTERFACE ------------------------------------------
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -29,6 +31,8 @@ close_socket() ->
 
 send_data(Addr, Data) ->
     gen_server:cast(?MODULE, {send_data, Addr, Data}).
+
+%% ----------------------------------------------------
 
 init(_Args) ->
     {ok, #state{}}.
