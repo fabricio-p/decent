@@ -14,36 +14,37 @@ main(Args) ->
 cli() -> #{
         arguments => [
             #{name => port, type => integer, long => "-port", short => $p},
-            #{name => address}
+            #{name => address, required => false}
         ],
-        handler =>
-            fun (Args) ->
-                {DstIp, DstPort} = case maps:get(address, Args, none) of 
-                    none -> io:format("no hostname supplied~n"), exit(no_hostname);
-                    Address -> 
-                        {Host, ParsedPort} = parse_address(Address),
-                        case resolve_host(Host) of 
-                            {ok, Ip} -> {Ip, ParsedPort};
-                            {error, ResolveReason} -> io:format("failed to resolve ~s: ~p~n", [Address, ResolveReason]), exit(ResolveReason)
-                        end
-                end,
-                case decent_sup:start_link() of
-                    {ok, _Pid} ->
-                        Port = maps:get(port, Args, decent_server:default_port()),
-                        decent_server:open_socket(Port),
-                        io:format("listening on port ~b~n", [Port]),
-                        % keep the shell process running
-                        input_loop(DstIp, DstPort);
-                    {error, StartReason} ->
-                        io:format("failed to start server: ~p~n", [StartReason])
-                end
-            end
+        handler => fun handle_cli_args/1
     }.
 
-input_loop(DstIp, DstPort) ->
+handle_cli_args(Args) ->
+    
+    case decent_sup:start_link() of
+        {ok, _Pid} ->
+            Port = maps:get(port, Args, decent_server:default_port()),
+            decent_server:open_socket(Port),
+            io:format("listening on port ~b~n", [Port]),
+            case maps:get(address, Args, none) of 
+                none -> ok;
+                Address -> 
+                    {Host, DstPort} = parse_address(Address),
+                    case resolve_host(Host) of 
+                        {ok, DstIp} -> decent_server:connect_to(DstIp, DstPort);
+                        {error, ResolveReason} -> io:format("failed to resolve ~s: ~p~n", [Address, ResolveReason]), exit(ResolveReason)
+                    end
+            end,
+            % keep the shell process running
+            input_loop();
+        {error, StartReason} ->
+            io:format("failed to start server: ~p~n", [StartReason])
+    end.
+
+input_loop() ->
     {ok, [Message]} = io:fread(">> ", "~s"),
-    decent_server:send_data(DstIp, DstPort, Message),
-    input_loop(DstIp, DstPort).
+    %decent_server:send_data(DstIp, DstPort, Message),
+    input_loop().
 
 parse_address(Address) -> 
     case string:tokens(Address, ":") of
