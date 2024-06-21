@@ -9,7 +9,7 @@
 
 -export([start_link/0]).
 
--export([default_port/0, open_socket/1, close_socket/0, send_data/2]).
+-export([default_port/0, open_socket/1, close_socket/0, send_data/3]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/1]).
 
@@ -29,8 +29,8 @@ open_socket(Port) ->
 close_socket() ->
     gen_server:call(?MODULE, close_socket).
 
-send_data(Addr, Data) ->
-    gen_server:cast(?MODULE, {send_data, Addr, Data}).
+send_data(Ip, Port, Data) ->
+    gen_server:cast(?MODULE, {send_data, Ip, Port, Data}).
 
 %% ----------------------------------------------------
 
@@ -57,18 +57,17 @@ handle_call(close_socket, _From, #state{socket = nil} = State) ->
     {reply, ok, State}.
 
 handle_cast(
-  {send_data, Addr, Data},
-  #state{socket = Socket, port = Port} = State
+  {send_data, Ip, Port, Data},
+  #state{socket = Socket} = State
  ) ->
-    gen_udp:send(Socket, Addr, Port, Data),
+    gen_udp:send(Socket, Ip, Port, Data),
     {noreply, State}.
 
 handle_info(
-  {udp, Socket, Ip, Port, Packet},
-  % I suppose I have to match on the Port
-  #state{socket = Socket, port = Port} = State
+  {udp, Socket, _Ip, _Port, Packet},
+  #state{ socket = Socket } = State
 ) ->
-    io:format("Received data(~p): ~p~n", [Ip, Packet]),
+    io:format("\r~s~n>> ", [Packet]),
     {noreply, State}.
 
 terminate(#state{socket = Socket}) when Socket =/= nil ->
