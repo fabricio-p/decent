@@ -24,8 +24,8 @@ send_message(Pid, Data) ->
     gen_server:cast(Pid, {send_message, Data}).
 %% gen_server internals --------------------------------------------------------
 
--define(ASYMETRIC_KEY_KIND, ecdh).
--define(ECDH_CURVE, x25519).
+-define(ECC_CURVE, x25519).
+-define(AEAD_CIPHER, chacha20_poly1305).
 
 -record(state, {ip        :: inet:ip_address(),
                 port      :: inet:port_number(),
@@ -33,7 +33,7 @@ send_message(Pid, Data) ->
 
 -record(handshake_req, {key :: binary()}).
 -record(handshake_ack, {key :: binary()}).
--record(encrypted, {data :: binary()}).
+-record(encrypted, {nonce :: binary(), data :: binary(), tag :: binary()}).
 
 -record(text_pack, {content :: binary()}).
 
@@ -63,8 +63,7 @@ handle_call(_Data, _From, State) ->
 % We assume try_connect is called only one time before anything
 handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
     logger:notice("Trying to connect", []),
-    Pub = <<"">>,
-    Priv = <<"">>,
+    {Pub, Priv} = generate_key_pair(),
     Key = {pair, Pub, Priv},
     Packet = #handshake_req{key = Pub},
     Data = serialize_packet(Packet),
@@ -92,12 +91,12 @@ handle_cast({message, Data}, #state{key = {pair, _Pub, _Priv}} = State) ->
 
 handle_cast(
   {message, Data},
-  #state{key = {shared, Key}, ip = Ip, port = Port} = State
+  #state{key = {shared, Key}} = State
  ) ->
-    #encrypted{data = EncryptedInnerPacket} = deserialize_packet(Data),
-    SerializedInnerPacket = decrypt_data(EncryptedInnerPacket, Key),
+    #encrypted{nonce = Nonce, data = Enc, tag = Tag} = deserialize_packet(Data),
+    SerializedInnerPacket = decrypt_data(Enc, Tag, Key, Nonce), % TODO: handle when this is `error`
     #text_pack{content = Content} = deserialize_packet(SerializedInnerPacket),
-    io:format("~p: ~p~n", [{Ip, Port}, Content]),
+    process_text(Content, State),
     {noreply, State};
 
 handle_cast(
@@ -106,8 +105,8 @@ handle_cast(
  ) ->
     InnerPacket = #text_pack{content = Data},
     SerializedInnerPacket = serialize_packet(InnerPacket),
-    EncryptedInnerPacket = encrypt_data(SerializedInnerPacket, Key),
-    Packet = #encrypted{data = EncryptedInnerPacket},
+    {Nonce, Enc, Tag} = encrypt_data(SerializedInnerPacket, Key),
+    Packet = #encrypted{nonce = Nonce, data = Enc, tag = Tag},
     SerializedPacket = serialize_packet(Packet),
     decent_server:send_data(SerializedPacket, Ip, Port),
     {noreply, State}.
@@ -118,46 +117,50 @@ terminate(_Reason, _State) ->
 %% Internal private functions --------------------------------------------------
 process_request(OtherPub, #state{ip = Ip, port = Port} = State) ->
     logger:notice("Processing request from ~p", [{Ip, Port}]),
-    Pub = <<"">>,
-    Priv = <<"">>,
-    Shared = compute_shared_key(Priv, OtherPub),
+    {MyPub, MyPriv} = generate_key_pair(),
+    Shared = compute_shared_key(OtherPub, MyPriv),
     Key = {shared, Shared},
-    Packet = #handshake_ack{key = Pub},
+    Packet = #handshake_ack{key = MyPub},
     Data = serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
     State#state{key = Key}.
 
-process_acknowledgement(OtherPub, #state{key = {pair, _Pub, Priv}} = State) ->
+process_acknowledgement(OtherPub, #state{key = {pair, _MyPub, MyPriv}} = State) ->
     logger:notice("Request for ~p acknowledged",
                  [{State#state.ip, State#state.port}]),
-    Shared = compute_shared_key(Priv, OtherPub),
+    Shared = compute_shared_key(OtherPub, MyPriv),
     Key = {shared, Shared},
     State#state{key = Key}.
 
-process_text(Data, #state{ip = Ip, port = Port, key = {shared, Key}} = State) ->
-    Content = decrypt_data(Data, Key),
-    io:format("~p: ~p~n", [{Ip, Port}, Content]),
+process_text(Data, #state{ip = Ip, port = Port} = State) ->
+    io:format("\r~p: ~s~n>> ", [{Ip, Port}, Data]),
     State.
 
 % TODO: To encrypt and serialize with protobuf
 % NOTE: The binary()/whatever types should should be aliased to more specific
 %       names.
 -spec encrypt_data(binary(), binary()) -> binary().
-encrypt_data(Data, _Key) ->
-    Data.
+encrypt_data(Data, Key) ->
+    Nonce = crypto:strong_rand_bytes(12),
+    {Enc, Tag} = crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Data, [], true),
+    {Nonce, Enc, Tag}.
 
 -spec serialize_packet(raw_packet() | encryped_packet()) -> binary().
 serialize_packet(Packet) ->
     term_to_binary(Packet).
 
--spec decrypt_data(binary(), binary()) -> binary().
-decrypt_data(Data, _Key) ->
-    Data.
+-spec decrypt_data(binary(), binary(), binary(), binary()) -> binary().
+decrypt_data(Enc, Tag, Key, Nonce) ->
+    crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Enc, [], Tag, false).
 
 -spec deserialize_packet(binary()) -> raw_packet() | encryped_packet().
 deserialize_packet(Data) ->
     binary_to_term(Data).
 
+-spec generate_key_pair() -> {binary(), binary()}.
+generate_key_pair() ->
+    crypto:generate_key(ecdh, ?ECC_CURVE).
+
 -spec compute_shared_key(binary(), binary()) -> binary().
-compute_shared_key(_MyPriv, _OtherPub) ->
-    <<"">>.
+compute_shared_key(OtherPub, MyPriv) ->
+    crypto:compute_key(ecdh, OtherPub, MyPriv, ?ECC_CURVE).
