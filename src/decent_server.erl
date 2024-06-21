@@ -7,19 +7,33 @@
 
 -behaviour(gen_server).
 
+%% callback for starting the process.
 -export([start_link/0]).
 
--export([default_port/0, open_socket/1, close_socket/0, send_data/1, connect_to/2]).
+%% process interface functions.
+-export([default_port/0,
+         open_socket/1,
+         close_socket/0,
+         send_data/1,
+         send_data/3,
+         connect_to/2,
+        request_worker/2]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/1]).
+%% internal gen_server callbacks. DO NOT CALL DIRECTLY!
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {contacts = [], port = 0, socket = nil}).
--define(PORT, 16#fab).
-
-%% INTERFACE ------------------------------------------
-
+%% INTERFACE -------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
+        {ok, Pid} ->
+            % process_flag(Pid, message_queue_data, off_heap),
+            {ok, Pid};
+
+        Error ->
+            Error
+    end.
+
+-define(PORT, 16#fab).
 
 default_port() -> ?PORT.
 
@@ -29,14 +43,36 @@ open_socket(Port) ->
 close_socket() ->
     gen_server:call(?MODULE, close_socket).
 
+-spec send_data(iodata()) -> ok.
+%% Send a chunk of data to all contacts.
 send_data(Data) ->
     gen_server:cast(?MODULE, {send_data, Data}).
 
+-spec send_data(iodata(), inet:ip_address(), inet:port_number()) -> ok.
+%% Send a chunk of data to the contact with ip Ip at port Port.
+send_data(Data, Ip, Port) ->
+    gen_server:cast(?MODULE, {send_data, Data, Ip, Port}).
+
+-spec connect_to(inet:ip_address(), inet:port_number()) -> ok.
 connect_to(Ip, Port) ->
     gen_server:cast(?MODULE, {connect_to, Ip, Port}).
 
-%% ----------------------------------------------------
+request_worker(Ip, Port) ->
+    gen_server:call(?MODULE, {request_worker, Ip, Port}).
 
+%% gen_server internals --------------------------------------------------------
+-type contact_addr() :: {inet:ip_address(), inet:port_number()}.
+
+-record(contact, {pid :: pid()}).
+-type contact() :: #contact{}.
+% -record(conn_req, {pub_key :: binary()}).
+
+-record(state, {contacts = #{} :: #{contact_addr() => contact()},
+                port = 0       :: inet:port_number(),
+                socket = nil   :: nil | inet:socket()}).
+-type state() :: #state{}.
+
+-spec init(any()) -> {ok, state()}.
 init(_Args) ->
     {ok, #state{}}.
 
@@ -54,46 +90,104 @@ handle_call({open_socket, Port}, _From, #state{socket = OldSocket} = State) ->
 
 handle_call(close_socket, _From, #state{socket = Socket} = State)
   when Socket =/= nil ->
+    % NOTE: Maybe we should kill the contact workers
     {noreply, gen_udp:close(Socket), State#state{port = 0, socket = nil}};
 
 handle_call(close_socket, _From, #state{socket = nil} = State) ->
-    {reply, ok, State}.
+    {reply, ok, State};
+
+handle_call(
+  {request_worker, Ip, Port},
+  _From,
+  #state{contacts = Contacts} = State
+ ) ->
+    % {Reply, NewContacts} =
+    %     case maps:get({Ip, Port}, Contacts, nil) of
+    %         nil ->
+    %             {{error, enoent}, Contacts};
+    %         #contact{pid = Pid} = Contact ->
+    %             NewContacts_ = maps:put({Ip, Port}, Contact#contact{ owner = })
+    Reply =
+        case maps:get({Ip, Port}, Contacts, nil) of
+            nil -> {error, enoent};
+
+            #contact{pid = Pid} -> {ok, Pid}
+        end,
+    {reply, Reply, State}.
 
 handle_cast(
   {send_data, Data},
   #state{contacts = Contacts, socket = Socket} = State
  ) ->
-    lists:foreach(fun({ Ip, Port }) -> 
-        spawn(fun() -> gen_udp:send(Socket, Ip, Port, Data) end)
-    end, Contacts),
-    
+    % plenty
+    maps:foreach(
+      fun(_Key, #contact{pid = Pid}) ->
+              decent_worker:send_message(Pid, Data)
+      end,
+      Contacts),
+
     {noreply, State};
 
-handle_cast(
-  {connect_to, Ip, Port},
-  #state{ socket = Socket, contacts = Contacts } = State
- ) ->
-    {Pub, _} = crypto:generate_key(ecdh, x25519),
-    gen_udp:send(Socket, Ip, Port, Pub),
-    {noreply, State#state { contacts = [{Ip, Port, Pub} | Contacts] } }.
+handle_cast({send_data, Data, Ip, Port}, #state{socket = Socket} = State) ->
+    gen_udp:send(Socket, Ip, Port, Data),
+    {noreply, State};
+
+handle_cast({connect_to, Ip, Port}, #state{contacts = Contacts} = State) ->
+    HasConnection = maps:is_key({Ip, Port}, Contacts),
+    NewContacts =
+        if
+            HasConnection ->
+                Contacts;
+            true ->
+                {Pid, NewContacts_} = spawn_contact_worker(Ip, Port, Contacts),
+                decent_worker:try_connect(Pid),
+                NewContacts_
+        end,
+    {noreply, State#state{contacts = NewContacts}}.
+
+handle_info({'DOWN', _Ref, process, _Pid, normal}, State) ->
+    {noreply, State};
+
 
 handle_info(
-  {udp, Socket, SrcIp, SrcPort, OtherPub},
-  #state{ socket = Socket, contacts = Contacts } = State
+  {'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
+  #state{contacts = Contacts} = State
+ ) ->
+    NewContacts = maps:remove({Ip, Port}, Contacts),
+    {noreply, State#state{contacts = NewContacts}};
+
+handle_info(
+  {udp, _Socket, SrcIp, SrcPort, Data},
+  #state{contacts = Contacts} = State
 ) ->
-    Secret = case lists:dropwhile(fun({Ip, Port, _}) -> Ip =/= SrcIp andalso Port =/= SrcPort end, Contacts) of % could use a refactor; this just finds the Pub with the right Ip and Port
-        [] -> 
-            {Pub, _} = crypto:generate_key(ecdh, x25519),
-            gen_udp:send(Socket, SrcIp, SrcPort, Pub),
-            crypto:compute_key(ecdh, Pub, OtherPub, x25519);
-        [{_, _, Pub} | _] -> crypto:compute_key(ecdh, OtherPub, Pub, x25519)
+    {Pid, NewContacts} = process_udp_packet(SrcIp, SrcPort, Contacts),
+
+    decent_worker:message(Pid, Data),
+    {noreply, State#state{contacts = NewContacts}}.
+
+terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
+    if Socket =/= nil ->
+            gen_udp:close(Socket)
     end,
+    kill_contact_workers(Contacts),
+    ok.
 
-    io:format("~p~n", [Secret]),
-    %io:format("\r~s~n>> ", [Packet]),
-    {noreply, State}.
+%% Internal private functions --------------------------------------------------
+process_udp_packet(Ip, Port, Contacts) ->
+    case maps:get({Ip, Port}, Contacts, nil) of
+        nil ->
+            spawn_contact_worker(Ip, Port, Contacts);
 
-terminate(#state{socket = Socket}) when Socket =/= nil ->
-    gen_udp:close(Socket);
+        #contact{pid = Pid} ->
+            {Pid, Contacts}
+    end.
+spawn_contact_worker(Ip, Port, Contacts) ->
+    {ok, Pid} = decent_worker:start_link({Ip, Port}),
+    NewContacts = maps:put({Ip, Port}, #contact{pid = Pid}, Contacts),
+    {Pid, NewContacts}.
 
-terminate(_State) -> nil.
+kill_contact_workers(Contacts) ->
+    maps:foreach(fun(_Addr, #contact{pid = Pid}) -> exit(Pid, normal) end,
+                 Contacts),
+    ok.
+%% -----------------------------------------------------------------------------

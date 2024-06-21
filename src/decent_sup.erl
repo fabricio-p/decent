@@ -31,8 +31,8 @@ init([]) ->
                  period => 1},
     ChildSpecs = [#{id => decent_server,
                     start => {decent_server, start_link, []},
-                    restart => permanent,
-                    shutdown => brutal_kill,
+                    restart => transient,
+                    shutdown => infinity,
                     type => worker,
                     modules => [decent_server]}],
     {ok, {SupFlags, ChildSpecs}}.
