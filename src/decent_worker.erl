@@ -2,10 +2,10 @@
 
 -behaviour(gen_server).
 
+-include("decent_protocol.hrl").
+
 -export([start_link/1]).
-
 -export([try_connect/1, message/2, send_message/2]).
-
 -export([init/1, handle_call/3, handle_cast/2, terminate/2]).
 
 %% INTERFACE -------------------------------------------------------------------
@@ -31,12 +31,6 @@ send_message(Pid, Data) ->
                 port      :: inet:port_number(),
                 key = nil :: nil | key()}).
 
--record(handshake_req, {key :: binary()}).
--record(handshake_ack, {key :: binary()}).
--record(encrypted, {nonce :: binary(), data :: binary(), tag :: binary()}).
-
--record(text_pack, {content :: binary()}).
-
 -type key() :: {pair,
                 crypto:ecdh_public(),
                 crypto:ecdh_private()} |
@@ -44,14 +38,6 @@ send_message(Pid, Data) ->
                 {shared, binary()}.
 -type state() :: #state{}.
 
--type handshake_req() :: #handshake_req{}.
--type handshake_ack() :: #handshake_ack{}.
--type encrypted() :: #encrypted{}.
-
--type text_pack() :: #text_pack{}.
-
--type raw_packet() :: handshake_req() | handshake_ack() | encrypted().
--type encryped_packet() :: text_pack().
 
 -spec init({inet:ip_address(), inet:port_number()}) -> {ok, state()}.
 init({Ip, Port}) ->
@@ -66,26 +52,24 @@ handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
     {Pub, Priv} = generate_key_pair(),
     Key = {pair, Pub, Priv},
     Packet = #handshake_req{key = Pub},
-    Data = serialize_packet(Packet),
+    Data = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
     {noreply, State#state{key = Key}};
 
 handle_cast({message, Data}, #state{key = nil} = State) ->
     NewState =
-        case deserialize_packet(Data) of
-            #handshake_req{key = Key} ->
-                process_request(Key, State);
-            #text_pack{content = Content} ->
-                process_text(Content, State)
+        case decent_protocol:deserialize_packet(Data) of
+            {ok, #handshake_req{key = Key}} ->
+                process_request(Key, State)
         end,
     {noreply, NewState};
 
 handle_cast({message, Data}, #state{key = {pair, _Pub, _Priv}} = State) ->
     NewState =
-        case deserialize_packet(Data) of
-            #handshake_ack{key = Key} ->
+        case decent_protocol:deserialize_packet(Data) of
+            {ok, #handshake_ack{key = Key}} ->
                 process_acknowledgement(Key, State)
-            % let it crash for now
+            % TODO handshake_req_secret
         end,
     {noreply, NewState};
 
@@ -93,21 +77,18 @@ handle_cast(
   {message, Data},
   #state{key = {shared, Key}} = State
  ) ->
-    #encrypted{nonce = Nonce, data = Enc, tag = Tag} = deserialize_packet(Data),
-    SerializedInnerPacket = decrypt_data(Enc, Tag, Key, Nonce), % TODO: handle when this is `error`
-    #text_pack{content = Content} = deserialize_packet(SerializedInnerPacket),
+    {ok, #encrypted_msg{nonce = Nonce, tag = Tag, data = Enc}} = decent_protocol:deserialize_packet(Data),
+    Content = decrypt_data(Enc, Tag, Key, Nonce), % TODO: handle when this is `error`
     process_text(Content, State),
     {noreply, State};
 
 handle_cast(
-  {send_message, Data},
+  {send_message, Content},
   #state{key = {shared, Key}, ip = Ip, port = Port} = State
  ) ->
-    InnerPacket = #text_pack{content = Data},
-    SerializedInnerPacket = serialize_packet(InnerPacket),
-    {Nonce, Enc, Tag} = encrypt_data(SerializedInnerPacket, Key),
-    Packet = #encrypted{nonce = Nonce, data = Enc, tag = Tag},
-    SerializedPacket = serialize_packet(Packet),
+    {Nonce, Enc, Tag} = encrypt_data(Content, Key),
+    Packet = #encrypted_msg{nonce = Nonce, tag = Tag, data = Enc},
+    SerializedPacket = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(SerializedPacket, Ip, Port),
     {noreply, State}.
 
@@ -121,7 +102,7 @@ process_request(OtherPub, #state{ip = Ip, port = Port} = State) ->
     Shared = compute_shared_key(OtherPub, MyPriv),
     Key = {shared, Shared},
     Packet = #handshake_ack{key = MyPub},
-    Data = serialize_packet(Packet),
+    Data = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
     State#state{key = Key}.
 
@@ -145,17 +126,9 @@ encrypt_data(Data, Key) ->
     {Enc, Tag} = crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Data, [], true),
     {Nonce, Enc, Tag}.
 
--spec serialize_packet(raw_packet() | encryped_packet()) -> binary().
-serialize_packet(Packet) ->
-    term_to_binary(Packet).
-
 -spec decrypt_data(binary(), binary(), binary(), binary()) -> binary().
 decrypt_data(Enc, Tag, Key, Nonce) ->
     crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Enc, [], Tag, false).
-
--spec deserialize_packet(binary()) -> raw_packet() | encryped_packet().
-deserialize_packet(Data) ->
-    binary_to_term(Data).
 
 -spec generate_key_pair() -> {binary(), binary()}.
 generate_key_pair() ->
