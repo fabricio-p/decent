@@ -25,7 +25,6 @@ send_message(Pid, Data) ->
 %% gen_server internals --------------------------------------------------------
 
 -define(ECC_CURVE, x25519).
--define(AEAD_CIPHER, chacha20_poly1305).
 
 -record(state, {ip        :: inet:ip_address(),
                 port      :: inet:port_number(),
@@ -34,14 +33,13 @@ send_message(Pid, Data) ->
 -type key() :: {pair,
                 crypto:ecdh_public(),
                 crypto:ecdh_private()} |
-                % NOTE: the key probably is some other more specific type
                 {shared, binary()}.
+
 -type state() :: #state{}.
 
-
 -spec init({inet:ip_address(), inet:port_number()}) -> {ok, state()}.
-init({Ip, Port}) ->
-    {ok, #state{ip = Ip, port = Port}}.
+init({Ip, Port, Key}) ->
+    {ok, #state{ip = Ip, port = Port, key = Key}}.
 
 handle_call(_Data, _From, State) ->
     {reply, ok, State}.
@@ -50,45 +48,24 @@ handle_call(_Data, _From, State) ->
 handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
     logger:notice("Trying to connect", []),
     {Pub, Priv} = generate_key_pair(),
-    Key = {pair, Pub, Priv},
     Packet = #handshake_req{key = Pub},
     Data = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
-    {noreply, State#state{key = Key}};
+    {noreply, State#state{key = {pair, Pub, Priv}}};
 
-handle_cast({message, Data}, #state{key = nil} = State) ->
-    NewState =
-        case decent_protocol:deserialize_packet(Data) of
-            {ok, #handshake_req{key = Key}} ->
-                process_request(Key, State)
-        end,
-    {noreply, NewState};
-
-handle_cast({message, Data}, #state{key = {pair, _Pub, _Priv}} = State) ->
-    NewState =
-        case decent_protocol:deserialize_packet(Data) of
-            {ok, #handshake_ack{key = Key}} ->
-                process_acknowledgement(Key, State)
-            % TODO handshake_req_secret
-        end,
+handle_cast(
+  {message, Packet},
+  State
+ ) ->
+    NewState = case decent_protocol:deserialize_packet(Packet) of
+        {ok, Data} -> process_packet(Data, State)
+    end,
     {noreply, NewState};
 
 handle_cast(
-  {message, Data},
-  #state{key = {shared, Key}} = State
+  {send_message, SerializedPacket},
+  #state{ip = Ip, port = Port} = State
  ) ->
-    {ok, #encrypted_msg{nonce = Nonce, tag = Tag, data = Enc}} = decent_protocol:deserialize_packet(Data),
-    Content = decrypt_data(Enc, Tag, Key, Nonce), % TODO: handle when this is `error`
-    process_text(Content, State),
-    {noreply, State};
-
-handle_cast(
-  {send_message, Content},
-  #state{key = {shared, Key}, ip = Ip, port = Port} = State
- ) ->
-    {Nonce, Enc, Tag} = encrypt_data(Content, Key),
-    Packet = #encrypted_msg{nonce = Nonce, tag = Tag, data = Enc},
-    SerializedPacket = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(SerializedPacket, Ip, Port),
     {noreply, State}.
 
@@ -96,44 +73,54 @@ terminate(_Reason, _State) ->
     nil.
 
 %% Internal private functions --------------------------------------------------
-process_request(OtherPub, #state{ip = Ip, port = Port} = State) ->
-    logger:notice("Processing request from ~p", [{Ip, Port}]),
+process_packet(#handshake_req{key = OtherPub}, #state{ip = Ip, port = Port, key = nil} = State) ->
+    logger:notice("Processing handshake request from ~p", [{Ip, Port}]),
     {MyPub, MyPriv} = generate_key_pair(),
     Shared = compute_shared_key(OtherPub, MyPriv),
-    Key = {shared, Shared},
+    decent_server:assign_secret(Shared),
     Packet = #handshake_ack{key = MyPub},
     Data = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
-    State#state{key = Key}.
+    State#state{key = {shared, Shared}};
 
-process_acknowledgement(OtherPub, #state{key = {pair, _MyPub, MyPriv}} = State) ->
-    logger:notice("Request for ~p acknowledged",
-                 [{State#state.ip, State#state.port}]),
+process_packet(#handshake_req{key = OtherPub}, #state{ip = Ip, port = Port, key = {shared, Secret}} = State) ->
+    logger:notice("Processing secret request from ~p", [{Ip, Port}]),
+    {MyPub, MyPriv} = generate_key_pair(),
     Shared = compute_shared_key(OtherPub, MyPriv),
-    Key = {shared, Shared},
-    State#state{key = Key}.
+    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(Secret, Shared),
+    Packet = #handshake_ack_secret{key = MyPub, secret = #encrypted{nonce = Nonce, tag = Tag, data = Enc}},
+    Data = decent_protocol:serialize_packet(Packet),
+    decent_server:send_data(Data, Ip, Port),
+    State;
+
+process_packet(#handshake_ack{key = OtherPub}, #state{ip = Ip, port = Port, key = {pair, _MyPub, MyPriv}} = State) ->
+    logger:notice("Request for ~p acknowledged",
+                 [{Ip, Port}]),
+    Secret = compute_shared_key(OtherPub, MyPriv),
+    decent_server:assign_secret(Secret),
+    State#state{key = {shared, Secret}};
+
+process_packet(#handshake_ack_secret{key = OtherPub, secret = #encrypted{nonce = Nonce, tag = Tag, data = Enc}}, #state{ip = Ip, port = Port, key = {pair, _MyPub, MyPriv}} = State) ->
+    logger:notice("Request for ~p acknowledged with secret",
+                 [{Ip, Port}]),
+    Shared = compute_shared_key(OtherPub, MyPriv),
+    Secret = decent_crypto:decrypt_data(Enc, Tag, Shared, Nonce), % TODO: handle when this is `error`
+    decent_server:assign_secret(Secret),
+    State#state{key = {shared, Secret}};
+
+process_packet(#encrypted{nonce = Nonce, tag = Tag, data = Enc}, #state{key = {shared, Key}} = State) ->
+    Content = decent_crypto:decrypt_data(Enc, Tag, Key, Nonce), % TODO: handle when this is `error`
+    process_text(Content, State),
+    State.
 
 process_text(Data, #state{ip = Ip, port = Port} = State) ->
     io:format("\r~p: ~s~n>> ", [{Ip, Port}, Data]),
     State.
 
-% TODO: To encrypt and serialize with protobuf
-% NOTE: The binary()/whatever types should should be aliased to more specific
-%       names.
--spec encrypt_data(binary(), binary()) -> binary().
-encrypt_data(Data, Key) ->
-    Nonce = crypto:strong_rand_bytes(12),
-    {Enc, Tag} = crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Data, [], true),
-    {Nonce, Enc, Tag}.
-
--spec decrypt_data(binary(), binary(), binary(), binary()) -> binary().
-decrypt_data(Enc, Tag, Key, Nonce) ->
-    crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Enc, [], Tag, false).
-
--spec generate_key_pair() -> {binary(), binary()}.
+-spec generate_key_pair() -> {crypto:ecdh_private(), crypto:ecdh_public()}.
 generate_key_pair() ->
     crypto:generate_key(ecdh, ?ECC_CURVE).
 
--spec compute_shared_key(binary(), binary()) -> binary().
+-spec compute_shared_key(crypto:ecdh_public(), crypto:ecdh_private()) -> binary().
 compute_shared_key(OtherPub, MyPriv) ->
     crypto:compute_key(ecdh, OtherPub, MyPriv, ?ECC_CURVE).

@@ -7,6 +7,8 @@
 
 -behaviour(gen_server).
 
+-include("decent_protocol.hrl").
+
 %% callback for starting the process.
 -export([start_link/0]).
 
@@ -17,6 +19,7 @@
          send_data/1,
          send_data/3,
          connect_to/2,
+         assign_secret/1,
         request_worker/2]).
 
 %% internal gen_server callbacks. DO NOT CALL DIRECTLY!
@@ -57,10 +60,16 @@ send_data(Data, Ip, Port) ->
 connect_to(Ip, Port) ->
     gen_server:cast(?MODULE, {connect_to, Ip, Port}).
 
+-spec assign_secret(binary()) -> ok.
+assign_secret(Secret) ->
+    gen_server:cast(?MODULE, {assign_secret, Secret}).
+
+-spec request_worker(inet:ip_address(), inet:port_number()) -> ok.
 request_worker(Ip, Port) ->
     gen_server:call(?MODULE, {request_worker, Ip, Port}).
 
 %% gen_server internals --------------------------------------------------------
+
 -type contact_addr() :: {inet:ip_address(), inet:port_number()}.
 
 -record(contact, {pid :: pid()}).
@@ -69,7 +78,9 @@ request_worker(Ip, Port) ->
 
 -record(state, {contacts = #{} :: #{contact_addr() => contact()},
                 port = 0       :: inet:port_number(),
-                socket = nil   :: nil | inet:socket()}).
+                socket = nil   :: nil | inet:socket(),
+                secret = nil   :: nil | {shared, binary()}}).
+
 -type state() :: #state{}.
 
 -spec init(any()) -> {ok, state()}.
@@ -116,13 +127,17 @@ handle_call(
     {reply, Reply, State}.
 
 handle_cast(
-  {send_data, Data},
-  #state{contacts = Contacts, socket = Socket} = State
+  {send_data, Content},
+  #state{contacts = Contacts, socket = _Socket, secret = {shared, Key}} = State
  ) ->
+    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(Content, Key),
+    Packet = #encrypted{nonce = Nonce, tag = Tag, data = Enc},
+    SerializedPacket = decent_protocol:serialize_packet(Packet),
+
     % plenty
     maps:foreach(
       fun(_Key, #contact{pid = Pid}) ->
-              decent_worker:send_message(Pid, Data)
+              decent_worker:send_message(Pid, SerializedPacket)
       end,
       Contacts),
 
@@ -132,22 +147,27 @@ handle_cast({send_data, Data, Ip, Port}, #state{socket = Socket} = State) ->
     gen_udp:send(Socket, Ip, Port, Data),
     {noreply, State};
 
-handle_cast({connect_to, Ip, Port}, #state{contacts = Contacts} = State) ->
+handle_cast({connect_to, Ip, Port}, #state{contacts = Contacts, secret = Secret} = State) ->
     HasConnection = maps:is_key({Ip, Port}, Contacts),
     NewContacts =
         if
             HasConnection ->
                 Contacts;
             true ->
-                {Pid, NewContacts_} = spawn_contact_worker(Ip, Port, Contacts),
+                {Pid, NewContacts_} = spawn_contact_worker(Ip, Port, Secret, Contacts),
                 decent_worker:try_connect(Pid),
                 NewContacts_
         end,
-    {noreply, State#state{contacts = NewContacts}}.
+    {noreply, State#state{contacts = NewContacts}};
+
+handle_cast({assign_secret, Secret}, #state{ secret = nil } = State) -> 
+    {noreply, State#state{ secret = {shared, Secret} }};
+
+handle_cast({assign_secret, _Secret}, #state{ secret = _OldSecret } = State) -> 
+    {noreply, State}.
 
 handle_info({'DOWN', _Ref, process, _Pid, normal}, State) ->
     {noreply, State};
-
 
 handle_info(
   {'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
@@ -158,10 +178,9 @@ handle_info(
 
 handle_info(
   {udp, _Socket, SrcIp, SrcPort, Data},
-  #state{contacts = Contacts} = State
+  #state{contacts = Contacts, secret = Secret} = State
 ) ->
-    {Pid, NewContacts} = process_udp_packet(SrcIp, SrcPort, Contacts),
-
+    {Pid, NewContacts} = process_udp_packet(SrcIp, SrcPort, Secret, Contacts),
     decent_worker:message(Pid, Data),
     {noreply, State#state{contacts = NewContacts}}.
 
@@ -173,16 +192,17 @@ terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
     ok.
 
 %% Internal private functions --------------------------------------------------
-process_udp_packet(Ip, Port, Contacts) ->
+process_udp_packet(Ip, Port, Secret, Contacts) ->
     case maps:get({Ip, Port}, Contacts, nil) of
         nil ->
-            spawn_contact_worker(Ip, Port, Contacts);
+            spawn_contact_worker(Ip, Port, Secret, Contacts);
 
         #contact{pid = Pid} ->
             {Pid, Contacts}
     end.
-spawn_contact_worker(Ip, Port, Contacts) ->
-    {ok, Pid} = decent_worker:start_link({Ip, Port}),
+
+spawn_contact_worker(Ip, Port, Secret, Contacts) ->
+    {ok, Pid} = decent_worker:start_link({Ip, Port, Secret}),
     NewContacts = maps:put({Ip, Port}, #contact{pid = Pid}, Contacts),
     {Pid, NewContacts}.
 
@@ -190,4 +210,5 @@ kill_contact_workers(Contacts) ->
     maps:foreach(fun(_Addr, #contact{pid = Pid}) -> exit(Pid, normal) end,
                  Contacts),
     ok.
+
 %% -----------------------------------------------------------------------------
