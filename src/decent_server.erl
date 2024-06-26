@@ -10,8 +10,8 @@
 -include("decent_protocol.hrl").
 
 %% callback for starting the process.
--export([start_link/0]).
 
+-export([start_link/0]).
 %% process interface functions.
 -export([default_port/0,
          open_socket/1,
@@ -23,9 +23,11 @@
         request_worker/2]).
 
 %% internal gen_server callbacks. DO NOT CALL DIRECTLY!
+
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 %% INTERFACE -------------------------------------------------------------------
+
 start_link() ->
     case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
         {ok, Pid} ->
@@ -36,33 +38,33 @@ start_link() ->
             Error
     end.
 
--define(PORT, 16#fab).
+-define(PORT, 4011).
 
-default_port() -> ?PORT.
+default_port() ->
+    ?PORT.
 
-open_socket(Port) ->
-    gen_server:call(?MODULE, {open_socket, Port}).
+open_socket(Port) -> gen_server:call(?MODULE, {open_socket, Port}).
 
-close_socket() ->
-    gen_server:call(?MODULE, close_socket).
+close_socket() -> gen_server:call(?MODULE, close_socket).
 
 -spec send_data(iodata()) -> ok.
+
 %% Send a chunk of data to all contacts.
-send_data(Data) ->
-    gen_server:cast(?MODULE, {send_data, Data}).
+
+send_data(Data) -> gen_server:cast(?MODULE, {send_data, Data}).
 
 -spec send_data(iodata(), inet:ip_address(), inet:port_number()) -> ok.
+
 %% Send a chunk of data to the contact with ip Ip at port Port.
+
 send_data(Data, Ip, Port) ->
     gen_server:cast(?MODULE, {send_data, Data, Ip, Port}).
 
 -spec connect_to(inet:ip_address(), inet:port_number()) -> ok.
-connect_to(Ip, Port) ->
-    gen_server:cast(?MODULE, {connect_to, Ip, Port}).
+connect_to(Ip, Port) -> gen_server:cast(?MODULE, {connect_to, Ip, Port}).
 
 -spec assign_secret(binary()) -> ok.
-assign_secret(Secret) ->
-    gen_server:cast(?MODULE, {assign_secret, Secret}).
+assign_secret(Secret) -> gen_server:cast(?MODULE, {assign_secret, Secret}).
 
 -spec request_worker(inet:ip_address(), inet:port_number()) -> ok.
 request_worker(Ip, Port) ->
@@ -73,7 +75,9 @@ request_worker(Ip, Port) ->
 -type contact_addr() :: {inet:ip_address(), inet:port_number()}.
 
 -record(contact, {pid :: pid()}).
+
 -type contact() :: #contact{}.
+
 % -record(conn_req, {pub_key :: binary()}).
 
 -record(state, {contacts = #{} :: #{contact_addr() => contact()},
@@ -84,26 +88,21 @@ request_worker(Ip, Port) ->
 -type state() :: #state{}.
 
 -spec init(any()) -> {ok, state()}.
-init(_Args) ->
-    {ok, #state{}}.
+init(_Args) -> {ok, #state{}}.
 
 handle_call({open_socket, Port}, _From, #state{socket = nil} = State) ->
     {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
     {reply, ok, State#state{port = Port, socket = Socket}};
-
 handle_call({open_socket, Port}, _From, #state{port = Port} = State) ->
     {reply, ok, State};
-
 handle_call({open_socket, Port}, _From, #state{socket = OldSocket} = State) ->
     Result = gen_udp:close(OldSocket),
     {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
     {reply, Result, State#state{port = Port, socket = Socket}};
-
 handle_call(close_socket, _From, #state{socket = Socket} = State)
   when Socket =/= nil ->
     % NOTE: Maybe we should kill the contact workers
     {noreply, gen_udp:close(Socket), State#state{port = 0, socket = nil}};
-
 handle_call(close_socket, _From, #state{socket = nil} = State) ->
     {reply, ok, State};
 
@@ -133,7 +132,6 @@ handle_cast(
     {Nonce, Enc, Tag} = decent_crypto:encrypt_data(Content, Key),
     Packet = #encrypted{nonce = Nonce, tag = Tag, data = Enc},
     SerializedPacket = decent_protocol:serialize_packet(Packet),
-
     % plenty
     maps:foreach(
       fun(_Key, #contact{pid = Pid}) ->
@@ -142,7 +140,6 @@ handle_cast(
       Contacts),
 
     {noreply, State};
-
 handle_cast({send_data, Data, Ip, Port}, #state{socket = Socket} = State) ->
     gen_udp:send(Socket, Ip, Port, Data),
     {noreply, State};
@@ -184,6 +181,7 @@ handle_info(
     decent_worker:message(Pid, Data),
     {noreply, State#state{contacts = NewContacts}}.
 
+
 terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
     if Socket =/= nil ->
             gen_udp:close(Socket)
@@ -192,6 +190,7 @@ terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
     ok.
 
 %% Internal private functions --------------------------------------------------
+
 process_udp_packet(Ip, Port, Secret, Contacts) ->
     case maps:get({Ip, Port}, Contacts, nil) of
         nil ->
@@ -201,14 +200,18 @@ process_udp_packet(Ip, Port, Secret, Contacts) ->
             {Pid, Contacts}
     end.
 
+
 spawn_contact_worker(Ip, Port, Secret, Contacts) ->
     {ok, Pid} = decent_worker:start_link({Ip, Port, Secret}),
     NewContacts = maps:put({Ip, Port}, #contact{pid = Pid}, Contacts),
     {Pid, NewContacts}.
 
+
 kill_contact_workers(Contacts) ->
-    maps:foreach(fun(_Addr, #contact{pid = Pid}) -> exit(Pid, normal) end,
-                 Contacts),
+    maps:foreach(
+        fun (_Addr, #contact{pid = Pid}) -> exit(Pid, normal) end,
+        Contacts
+    ),
     ok.
 
 %% -----------------------------------------------------------------------------
