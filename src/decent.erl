@@ -86,6 +86,7 @@ parse_address(AddrStr) ->
         [Host, PortStr] ->
             Port = list_to_integer(PortStr),
             {ok, Host, Port};
+
         [Host] ->
             Port = decent_server:default_port(),
             {ok, Host, Port};

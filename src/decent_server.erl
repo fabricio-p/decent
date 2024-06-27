@@ -12,15 +12,19 @@
 %% callback for starting the process.
 
 -export([start_link/0]).
+
 %% process interface functions.
--export([default_port/0,
-         open_socket/1,
-         close_socket/0,
-         send_data/1,
-         send_data/3,
-         connect_to/2,
-         assign_secret/1,
-        request_worker/2]).
+
+-export(
+    [
+        default_port/0,
+        open_socket/1,
+        send_data/1,
+        send_data/3,
+        connect_to/2,
+        assign_room_key/1
+    ]
+).
 
 %% internal gen_server callbacks. DO NOT CALL DIRECTLY!
 
@@ -34,18 +38,14 @@ start_link() ->
             % process_flag(Pid, message_queue_data, off_heap),
             {ok, Pid};
 
-        Error ->
-            Error
+        Error -> Error
     end.
 
 -define(PORT, 4011).
 
-default_port() ->
-    ?PORT.
+default_port() -> ?PORT.
 
 open_socket(Port) -> gen_server:call(?MODULE, {open_socket, Port}).
-
-close_socket() -> gen_server:call(?MODULE, close_socket).
 
 -spec send_data(iodata()) -> ok.
 
@@ -63,12 +63,9 @@ send_data(Data, Ip, Port) ->
 -spec connect_to(inet:ip_address(), inet:port_number()) -> ok.
 connect_to(Ip, Port) -> gen_server:cast(?MODULE, {connect_to, Ip, Port}).
 
--spec assign_secret(binary()) -> ok.
-assign_secret(Secret) -> gen_server:cast(?MODULE, {assign_secret, Secret}).
-
--spec request_worker(inet:ip_address(), inet:port_number()) -> ok.
-request_worker(Ip, Port) ->
-    gen_server:call(?MODULE, {request_worker, Ip, Port}).
+-spec assign_room_key(binary()) -> ok.
+assign_room_key(RoomKey) ->
+    gen_server:cast(?MODULE, {assign_room_key, RoomKey}).
 
 %% gen_server internals --------------------------------------------------------
 
@@ -79,130 +76,128 @@ request_worker(Ip, Port) ->
 -type contact() :: #contact{}.
 
 % -record(conn_req, {pub_key :: binary()}).
-
--record(state, {contacts = #{} :: #{contact_addr() => contact()},
-                port = 0       :: inet:port_number(),
-                socket = nil   :: nil | inet:socket(),
-                secret = nil   :: nil | {shared, binary()}}).
+-record(
+    state,
+    {
+        contacts = #{} :: #{contact_addr() => contact()},
+        port = 0 :: inet:port_number(),
+        socket = nil :: nil | inet:socket(),
+        room = nil :: nil | {roomkey, binary()}
+    }
+).
 
 -type state() :: #state{}.
 
 -spec init(any()) -> {ok, state()}.
 init(_Args) -> {ok, #state{}}.
 
+%% Opens a UDP socket on the specified port
+
 handle_call({open_socket, Port}, _From, #state{socket = nil} = State) ->
     {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
     {reply, ok, State#state{port = Port, socket = Socket}};
+
+%% If the socket is already open on the specified port, nothing happens
 handle_call({open_socket, Port}, _From, #state{port = Port} = State) ->
     {reply, ok, State};
+
+%% If the socket is open on a different port, the old socket is closed and a new one is opened on the specified port
 handle_call({open_socket, Port}, _From, #state{socket = OldSocket} = State) ->
     Result = gen_udp:close(OldSocket),
     {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
-    {reply, Result, State#state{port = Port, socket = Socket}};
-handle_call(close_socket, _From, #state{socket = Socket} = State)
-  when Socket =/= nil ->
-    % NOTE: Maybe we should kill the contact workers
-    {noreply, gen_udp:close(Socket), State#state{port = 0, socket = nil}};
-handle_call(close_socket, _From, #state{socket = nil} = State) ->
-    {reply, ok, State};
+    {reply, Result, State#state{port = Port, socket = Socket}}.
 
-handle_call(
-  {request_worker, Ip, Port},
-  _From,
-  #state{contacts = Contacts} = State
- ) ->
-    % {Reply, NewContacts} =
-    %     case maps:get({Ip, Port}, Contacts, nil) of
-    %         nil ->
-    %             {{error, enoent}, Contacts};
-    %         #contact{pid = Pid} = Contact ->
-    %             NewContacts_ = maps:put({Ip, Port}, Contact#contact{ owner = })
-    Reply =
-        case maps:get({Ip, Port}, Contacts, nil) of
-            nil -> {error, enoent};
-
-            #contact{pid = Pid} -> {ok, Pid}
-        end,
-    {reply, Reply, State}.
+%% Sends a message to all contacts
 
 handle_cast(
-  {send_data, Content},
-  #state{contacts = Contacts, socket = _Socket, secret = {shared, Key}} = State
- ) ->
-    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(Content, Key),
+    {send_data, Content},
+    #state{contacts = Contacts, socket = Socket, room = {roomkey, Key}} = State
+) ->
+    % NOTE: Maybe mode this to another cast thing, send data is for raw data imo
+    InnerPacket = #text_packet{content = Content},
+    SerializedInnerPacket = decent_protocol:serialize_packet(InnerPacket),
+    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(SerializedInnerPacket, Key),
     Packet = #encrypted{nonce = Nonce, tag = Tag, data = Enc},
     SerializedPacket = decent_protocol:serialize_packet(Packet),
-    % plenty
     maps:foreach(
-      fun(_Key, #contact{pid = Pid}) ->
-              decent_worker:send_message(Pid, SerializedPacket)
-      end,
-      Contacts),
-
+        fun
+            ({Ip, Port}, #contact{pid = _Pid}) ->
+                gen_udp:send(Socket, Ip, Port, SerializedPacket)
+        end,
+        Contacts
+    ),
     {noreply, State};
+
+%% Sends data to the specified ip and port
 handle_cast({send_data, Data, Ip, Port}, #state{socket = Socket} = State) ->
     gen_udp:send(Socket, Ip, Port, Data),
     {noreply, State};
 
-handle_cast({connect_to, Ip, Port}, #state{contacts = Contacts, secret = Secret} = State) ->
+%% Connects to and establishes contact with the specified ip and port
+handle_cast(
+    {connect_to, Ip, Port},
+    #state{contacts = Contacts, room = RoomKey} = State
+) ->
     HasConnection = maps:is_key({Ip, Port}, Contacts),
     NewContacts =
         if
-            HasConnection ->
-                Contacts;
+            HasConnection -> Contacts;
+
             true ->
-                {Pid, NewContacts_} = spawn_contact_worker(Ip, Port, Secret, Contacts),
+                {Pid, NewContacts_} =
+                    spawn_contact_worker(Ip, Port, RoomKey, Contacts),
                 decent_worker:try_connect(Pid),
                 NewContacts_
         end,
     {noreply, State#state{contacts = NewContacts}};
 
-handle_cast({assign_secret, Secret}, #state{ secret = nil } = State) -> 
-    {noreply, State#state{ secret = {shared, Secret} }};
+%% Assigns a global room key
+handle_cast({assign_room_key, RoomKey}, #state{room = nil} = State) ->
+    {noreply, State#state{room = {roomkey, RoomKey}}};
 
-handle_cast({assign_secret, _Secret}, #state{ secret = _OldSecret } = State) -> 
+%% Ignores the new room key if a room key is already assigned.
+handle_cast({assign_room_key, _RoomKey}, #state{room = _OldRoomKey} = State) ->
     {noreply, State}.
 
-handle_info({'DOWN', _Ref, process, _Pid, normal}, State) ->
-    {noreply, State};
 
+handle_info({'DOWN', _Ref, process, _Pid, normal}, State) -> {noreply, State};
+%% Removes the ip and port from the contacts map
 handle_info(
-  {'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
-  #state{contacts = Contacts} = State
- ) ->
+    {'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
+    #state{contacts = Contacts} = State
+) ->
     NewContacts = maps:remove({Ip, Port}, Contacts),
     {noreply, State#state{contacts = NewContacts}};
 
+%% Processes a UDP message
 handle_info(
-  {udp, _Socket, SrcIp, SrcPort, Data},
-  #state{contacts = Contacts, secret = Secret} = State
+    {udp, _Socket, SrcIp, SrcPort, Data},
+    #state{contacts = Contacts, room = RoomKey} = State
 ) ->
-    {Pid, NewContacts} = process_udp_packet(SrcIp, SrcPort, Secret, Contacts),
-    decent_worker:message(Pid, Data),
+    {Pid, NewContacts} = process_udp_packet(SrcIp, SrcPort, RoomKey, Contacts),
+    decent_worker:handle_packet(Pid, Data),
     {noreply, State#state{contacts = NewContacts}}.
 
+%% Terminates the server
 
 terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
-    if Socket =/= nil ->
-            gen_udp:close(Socket)
-    end,
+    if Socket =/= nil -> gen_udp:close(Socket) end,
     kill_contact_workers(Contacts),
     ok.
 
 %% Internal private functions --------------------------------------------------
+%% Processes a UDP packet and either creates a new contact worker or retrieves
+%% an existing one
 
-process_udp_packet(Ip, Port, Secret, Contacts) ->
+process_udp_packet(Ip, Port, RoomKey, Contacts) ->
     case maps:get({Ip, Port}, Contacts, nil) of
-        nil ->
-            spawn_contact_worker(Ip, Port, Secret, Contacts);
-
-        #contact{pid = Pid} ->
-            {Pid, Contacts}
+        nil -> spawn_contact_worker(Ip, Port, RoomKey, Contacts);
+        #contact{pid = Pid} -> {Pid, Contacts}
     end.
 
 
-spawn_contact_worker(Ip, Port, Secret, Contacts) ->
-    {ok, Pid} = decent_worker:start_link({Ip, Port, Secret}),
+spawn_contact_worker(Ip, Port, RoomKey, Contacts) ->
+    {ok, Pid} = decent_worker:start_link({Ip, Port, RoomKey}),
     NewContacts = maps:put({Ip, Port}, #contact{pid = Pid}, Contacts),
     {Pid, NewContacts}.
 

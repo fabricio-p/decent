@@ -4,11 +4,11 @@
 
 -type handshake_req() :: #handshake_req{}.
 -type handshake_ack() :: #handshake_ack{}.
--type handshake_ack_secret() :: #handshake_ack_secret{}.
+-type handshake_ack_roomkey() :: #handshake_ack_roomkey{}.
 -type encrypted() :: #encrypted{}.
 -type raw_packet() :: handshake_req()
                     | handshake_ack()
-                    | handshake_ack_secret()
+                    | handshake_ack_roomkey()
                     | encrypted().
 
 -export([serialize_packet/1, deserialize_packet/1]).
@@ -27,12 +27,12 @@ serialize_packet(#handshake_req{key = Key}) -> <<0, Key/binary>>;
 serialize_packet(#handshake_ack{key = Key}) -> <<1, Key/binary>>;
 
 serialize_packet(
-    #handshake_ack_secret{
+    #handshake_ack_roomkey{
         key = Key,
-        secret = #encrypted{nonce = Nonce, tag = Tag, data = Secret}
+        roomkey = #encrypted{nonce = Nonce, tag = Tag, data = RoomKey}
     }
 ) ->
-    <<2, Key/binary, Nonce/binary, Tag/binary, Secret/binary>>;
+    <<2, Key/binary, Nonce/binary, Tag/binary, RoomKey/binary>>;
 
 serialize_packet(#encrypted{nonce = Nonce, tag = Tag, data = Data}) ->
     <<3, Nonce/binary, Tag/binary, Data/binary>>;
@@ -50,13 +50,13 @@ deserialize_packet(<<0, Data/binary>>) -> {ok, #handshake_req{key = Data}};
 deserialize_packet(<<1, Data/binary>>) -> {ok, #handshake_ack{key = Data}};
 
 deserialize_packet(
-    <<2, Key:32/binary, Nonce:12/binary, Tag:16/binary, Secret/binary>>
+    <<2, Key:32/binary, Nonce:12/binary, Tag:16/binary, RoomKey/binary>>
 ) ->
     {
         ok,
-        #handshake_ack_secret{
+        #handshake_ack_roomkey{
             key = Key,
-            secret = #encrypted{nonce = Nonce, tag = Tag, data = Secret}
+            roomkey = #encrypted{nonce = Nonce, tag = Tag, data = RoomKey}
         }
     };
 
@@ -110,6 +110,7 @@ deserialize_peer(<<Ip0, Ip1, Ip2, Ip3, Port:16/big, Rest/binary>>) ->
     Ip = {Ip0, Ip1, Ip2, Ip3},
     Peer = {Ip, Port},
     {ok, Peer, Rest};
+
 deserialize_peer(_Data) ->
     % NOTE: The errors could be more descriptive
     {error, invalid_peer}.
