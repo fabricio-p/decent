@@ -29,8 +29,8 @@ handle_cli_args(Args) ->
     case decent_app:start([], []) of
         {ok, _Pid} ->
             Port = maps:get(port, Args, decent_server:default_port()),
-            decent_server:open_socket(Port),
-            io:format("listening on port ~b~n", [Port]),
+            {ok, RealPort} = decent_server:open_socket(Port),
+            io:format("listening on port ~b~n", [RealPort]),
             State =
                 case extract_parsed_address(Args) of
                     {ok, DstPort, DstIp} ->

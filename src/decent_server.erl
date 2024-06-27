@@ -14,18 +14,8 @@
 -export([start_link/0]).
 
 %% process interface functions.
-
--export(
-    [
-        default_port/0,
-        open_socket/1,
-        send_data/1,
-        send_data/3,
-        connect_to/2,
-        assign_room_key/1
-    ]
-).
-
+-export([default_port/0, open_socket/1, send_data/1,
+         send_data/3, connect_to/2, assign_roomkey/1]).
 %% internal gen_server callbacks. DO NOT CALL DIRECTLY!
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -63,9 +53,9 @@ send_data(Data, Ip, Port) ->
 -spec connect_to(inet:ip_address(), inet:port_number()) -> ok.
 connect_to(Ip, Port) -> gen_server:cast(?MODULE, {connect_to, Ip, Port}).
 
--spec assign_room_key(binary()) -> ok.
-assign_room_key(RoomKey) ->
-    gen_server:cast(?MODULE, {assign_room_key, RoomKey}).
+-spec assign_roomkey(binary()) -> ok.
+assign_roomkey(RoomKey) ->
+    gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
 
 %% gen_server internals --------------------------------------------------------
 
@@ -94,18 +84,15 @@ init(_Args) -> {ok, #state{}}.
 %% Opens a UDP socket on the specified port
 
 handle_call({open_socket, Port}, _From, #state{socket = nil} = State) ->
-    {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
-    {reply, ok, State#state{port = Port, socket = Socket}};
-
+    open_socket_on_port(Port, State);
 %% If the socket is already open on the specified port, nothing happens
 handle_call({open_socket, Port}, _From, #state{port = Port} = State) ->
     {reply, ok, State};
 
 %% If the socket is open on a different port, the old socket is closed and a new one is opened on the specified port
 handle_call({open_socket, Port}, _From, #state{socket = OldSocket} = State) ->
-    Result = gen_udp:close(OldSocket),
-    {ok, Socket} = gen_udp:open(Port, [binary, {active, true}]),
-    {reply, Result, State#state{port = Port, socket = Socket}}.
+    ok = gen_udp:close(OldSocket),
+    open_socket_on_port(Port, State).
 
 %% Sends a message to all contacts
 
@@ -152,20 +139,18 @@ handle_cast(
     {noreply, State#state{contacts = NewContacts}};
 
 %% Assigns a global room key
-handle_cast({assign_room_key, RoomKey}, #state{room = nil} = State) ->
+handle_cast({assign_roomkey, RoomKey}, #state{room = nil} = State) ->
     {noreply, State#state{room = {roomkey, RoomKey}}};
 
 %% Ignores the new room key if a room key is already assigned.
-handle_cast({assign_room_key, _RoomKey}, #state{room = _OldRoomKey} = State) ->
+handle_cast({assign_roomkey, _RoomKey}, #state{room = _OldRoomKey} = State) ->
     {noreply, State}.
 
-
-handle_info({'DOWN', _Ref, process, _Pid, normal}, State) -> {noreply, State};
-%% Removes the ip and port from the contacts map
-handle_info(
-    {'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
-    #state{contacts = Contacts} = State
-) ->
+handle_info({'DOWN', _Ref, process, _Pid, normal}, State) ->
+    {noreply, State};
+%% Removes the ip and port from the contacts map since the worker died
+handle_info({'DOWN', _Ref, process, _Pid, {disconnect, Ip, Port}},
+            #state{contacts = Contacts} = State) ->
     NewContacts = maps:remove({Ip, Port}, Contacts),
     {noreply, State#state{contacts = NewContacts}};
 
@@ -186,6 +171,15 @@ terminate(_Reason, #state{socket = Socket, contacts = Contacts}) ->
     ok.
 
 %% Internal private functions --------------------------------------------------
+open_socket_on_port(Port, State) when Port > 65535 ->
+    {reply, {error, invalid_port}, State};
+
+open_socket_on_port(Port, State) ->
+    case gen_udp:open(Port, [binary, {active, true}]) of
+        {ok, Socket} -> {reply, {ok, Port}, State#state{port = Port, socket = Socket}};
+        {error, eaddrinuse} -> open_socket_on_port(Port + 1, State)
+    end.
+
 %% Processes a UDP packet and either creates a new contact worker or retrieves
 %% an existing one
 

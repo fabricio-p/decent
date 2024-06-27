@@ -84,7 +84,7 @@ process_packet(
     ),
     {MyPub, MyPriv} = decent_crypto:generate_key_pair(),
     Shared = decent_crypto:compute_shared_key(OtherPub, MyPriv),
-    decent_server:assign_room_key(Shared),
+    decent_server:assign_roomkey(Shared),
     Packet = #handshake_ack{key = MyPub},
     Data = decent_protocol:serialize_packet(Packet),
     decent_server:send_data(Data, Ip, Port),
@@ -121,14 +121,10 @@ process_packet(
     #state{ip = Ip, port = Port, key = {pair, _MyPub, MyPriv}} = State
 ) ->
     RoomKey = decent_crypto:compute_shared_key(OtherPub, MyPriv),
-    logger:debug(
-        #{
-            from => {Ip, Port},
-            in => {decent_worker, process_packet, 2},
-            roomkey => RoomKey
-        }
-    ),
-    decent_server:assign_room_key(RoomKey),
+    logger:debug(#{from => {Ip, Port},
+                   in => {decent_worker, process_packet, 2},
+                   roomkey => RoomKey}),
+    decent_server:assign_roomkey(RoomKey),
     State#state{key = {roomkey, RoomKey}};
 
 %% Acknowledged, we received an encrypted room key
@@ -143,7 +139,7 @@ process_packet(
     Shared = decent_crypto:compute_shared_key(OtherPub, MyPriv),
     % TODO: handle when this is `error`
     RoomKey = decent_crypto:decrypt_data(Enc, Tag, Shared, Nonce),
-    decent_server:assign_room_key(RoomKey),
+    decent_server:assign_roomkey(RoomKey),
     State#state{key = {roomkey, RoomKey}};
 
 %% We received an encrypted message
