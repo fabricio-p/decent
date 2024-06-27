@@ -23,8 +23,12 @@
 -export_type([handshake_req/0, handshake_ack/0, encrypted/0]).
 
 -spec serialize_packet(raw_packet()) -> binary().
-serialize_packet(#handshake_req{key = Key}) -> <<0, Key/binary>>;
-serialize_packet(#handshake_ack{key = Key}) -> <<1, Key/binary>>;
+
+serialize_packet(#signed{pubkey = PubKey, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Data}}) ->
+    <<0, PubKey/binary, Signature/binary, Nonce/binary, Tag/binary, Data/binary>>;
+
+serialize_packet(#handshake_req{key = Key}) -> <<10, Key/binary>>;
+serialize_packet(#handshake_ack{key = Key}) -> <<11, Key/binary>>;
 
 serialize_packet(
     #handshake_ack_roomkey{
@@ -32,27 +36,27 @@ serialize_packet(
         roomkey = #encrypted{nonce = Nonce, tag = Tag, data = RoomKey}
     }
 ) ->
-    <<2, Key/binary, Nonce/binary, Tag/binary, RoomKey/binary>>;
-
-serialize_packet(#encrypted{nonce = Nonce, tag = Tag, data = Data}) ->
-    <<3, Nonce/binary, Tag/binary, Data/binary>>;
+    <<12, Key/binary, Nonce/binary, Tag/binary, RoomKey/binary>>;
 
 serialize_packet(#message_packet{nick = Nick, content = Content}) ->
     NickBinary = serialize_varbinary(<<Nick/binary>>),
-    <<4, NickBinary/binary, Content/binary>>;
+    <<13, NickBinary/binary, Content/binary>>;
 
 serialize_packet(#peers_packet{peers = Peers}) ->
     {PeerCount, SerializedPeers} = serialize_peers(Peers),
-    <<5, PeerCount:32/big, SerializedPeers/binary>>.
-
+    <<14, PeerCount:32/big, SerializedPeers/binary>>.
 
 -spec deserialize_packet(binary()) ->
     {ok, raw_packet()} | {error, Reason} when Reason :: invalid.
-deserialize_packet(<<0, Data/binary>>) -> {ok, #handshake_req{key = Data}};
-deserialize_packet(<<1, Data/binary>>) -> {ok, #handshake_ack{key = Data}};
+
+deserialize_packet(<<0, PubKey:32/binary, Signature:64/binary, Nonce:12/binary, Tag:16/binary, Data/binary>>) ->
+    {ok, #signed{pubkey = PubKey, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Data}}};
+
+deserialize_packet(<<10, Data/binary>>) -> {ok, #handshake_req{key = Data}};
+deserialize_packet(<<11, Data/binary>>) -> {ok, #handshake_ack{key = Data}};
 
 deserialize_packet(
-    <<2, Key:32/binary, Nonce:12/binary, Tag:16/binary, RoomKey/binary>>
+    <<12, Key:32/binary, Nonce:12/binary, Tag:16/binary, RoomKey/binary>>
 ) ->
     {
         ok,
@@ -62,21 +66,17 @@ deserialize_packet(
         }
     };
 
-deserialize_packet(<<3, Nonce:12/binary, Tag:16/binary, Data/binary>>) ->
-    {ok, #encrypted{nonce = Nonce, tag = Tag, data = Data}};
-
-deserialize_packet(<<4, NickAndContent/binary>>) ->
+deserialize_packet(<<13, NickAndContent/binary>>) ->
     {Nick, Content} = deserialize_varbinary(NickAndContent),
     {ok, #message_packet{nick = Nick, content = Content}};
 
-deserialize_packet(<<5, PeerCount:32/big, SerializedPeers/binary>>) ->
+deserialize_packet(<<14, PeerCount:32/big, SerializedPeers/binary>>) ->
     case deserialize_peers(PeerCount, SerializedPeers) of
         {ok, Peers} -> {ok, #peers_packet{peers = Peers}};
         Error -> Error
     end;
 
 deserialize_packet(_Data) -> {error, invalid}.
-
 
 serialize_peers(Peers) -> serialize_peers(Peers, 0, <<>>).
 

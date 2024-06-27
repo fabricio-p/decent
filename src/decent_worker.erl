@@ -43,7 +43,7 @@ handle_call(_Data, _From, State) -> {reply, ok, State}.
 %% We assume try_connect is called only one time before anything
 
 handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
-    {Pub, Priv} = decent_crypto:generate_key_pair(),
+    {Pub, Priv} = decent_crypto:generate_ecdh_key_pair(),
     Packet = #handshake_req{key = Pub},
     logger:debug(
         #{
@@ -100,7 +100,7 @@ try_process_private_packet(
             key => nil
         }
     ),
-    {MyPub, MyPriv} = decent_crypto:generate_key_pair(),
+    {MyPub, MyPriv} = decent_crypto:generate_ecdh_key_pair(),
     Shared = decent_crypto:compute_shared_key(OtherPub, MyPriv),
     decent_server:assign_roomkey(Shared),
     Packet = #handshake_ack{key = MyPub},
@@ -121,9 +121,9 @@ try_process_private_packet(
             key => {roomkey, RoomKey}
         }
     ),
-    {MyPub, MyPriv} = decent_crypto:generate_key_pair(),
+    {MyPub, MyPriv} = decent_crypto:generate_ecdh_key_pair(),
     Shared = decent_crypto:compute_shared_key(OtherPub, MyPriv),
-    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(RoomKey, Shared),
+    {Nonce, Enc, Tag} = decent_crypto:encrypt(RoomKey, Shared),
     Packet =
         #handshake_ack_roomkey{
             key = MyPub,
@@ -160,7 +160,7 @@ try_process_private_packet(
     logger:notice("Request for ~p acknowledged with room key", [{Ip, Port}]),
     Shared = decent_crypto:compute_shared_key(OtherPub, MyPriv),
     % TODO: handle when this is `error`
-    RoomKey = decent_crypto:decrypt_data(Enc, Tag, Shared, Nonce),
+    RoomKey = decent_crypto:decrypt(Enc, Tag, Shared, Nonce),
     decent_server:assign_roomkey(RoomKey),
     State#state{key = {roomkey, RoomKey}};
 
@@ -169,17 +169,20 @@ try_process_private_packet(_Packet, _State) -> next.
 %% We received an encrypted message
 
 process_public_packet(
-    #encrypted{nonce = Nonce, tag = Tag, data = Enc},
+    #signed {pubkey = OtherPub, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}},
     #state{key = {roomkey, Key}} = State
 ) ->
     % TODO: handle when this is `error`
-    Serialized = decent_crypto:decrypt_data(Enc, Tag, Key, Nonce),
+    Serialized = decent_crypto:decrypt(Enc, Tag, Key, Nonce),
+    Digest = decent_crypto:hash(Serialized),
+    true = decent_crypto:verify(Digest, Signature, OtherPub),
     case decent_protocol:deserialize_packet(Serialized) of
         {ok, #message_packet{nick = Nick, content = Content}} ->
-            process_text(Nick, Content, State)
+            process_text(Nick, OtherPub, Content, State)
     end.
 
 
-process_text(Nick, Content, State) ->
-    io:format("\r~s: ~s~n>> ", [Nick, Content]),
+process_text(Nick, <<Checksum:32, _/binary>>, Content, State) ->
+    ChecksumString = string:to_lower(io_lib:format("~7.16B", [Checksum bsr 4])),
+    io:format("\r~s [~s]: ~s~n>> ", [Nick, ChecksumString, Content]),
     State.

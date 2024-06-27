@@ -78,6 +78,7 @@ assign_roomkey(RoomKey) -> gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
         port = 0 :: inet:port_number(),
         socket = nil :: nil | inet:socket(),
         room = nil :: nil | {roomkey, binary()},
+        sigkey :: {crypto:eddsa_private(), crypto:eddsa_public()},
         seen = sets:new() :: sets:set(binary())
     }
 ).
@@ -85,7 +86,7 @@ assign_roomkey(RoomKey) -> gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
 -type state() :: #state{}.
 
 -spec init(string()) -> {ok, state()}.
-init(Nick) -> {ok, #state{nick = Nick}}.
+init(Nick) -> {ok, #state{nick = Nick, sigkey = decent_crypto:generate_key_pair()}}.
 
 %% Opens a UDP socket on the specified port
 
@@ -114,12 +115,14 @@ handle_call({seen_packet, Packet}, _From, #state{seen = Seen} = State) ->
 
 handle_cast(
     {send_message, Content},
-    #state{nick = Nick, room = {roomkey, Key}} = State
+    #state{nick = Nick, room = {roomkey, Key}, sigkey = {MyPub, MyPriv}} = State
 ) ->
     InnerPacket = #message_packet{nick = Nick, content = Content},
     SerializedInnerPacket = decent_protocol:serialize_packet(InnerPacket),
-    {Nonce, Enc, Tag} = decent_crypto:encrypt_data(SerializedInnerPacket, Key),
-    Packet = #encrypted{nonce = Nonce, tag = Tag, data = Enc},
+    HashedMessage = decent_crypto:hash(SerializedInnerPacket),
+    Signature = decent_crypto:sign(HashedMessage, MyPriv),
+    {Nonce, Enc, Tag} = decent_crypto:encrypt(SerializedInnerPacket, Key),
+    Packet = #signed{pubkey = MyPub, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}},
     SerializedPacket = decent_protocol:serialize_packet(Packet),
     send_to_all(SerializedPacket, State),
     {noreply, State};
