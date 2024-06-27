@@ -37,7 +37,9 @@ serialize_packet(
 serialize_packet(#encrypted{nonce = Nonce, tag = Tag, data = Data}) ->
     <<3, Nonce/binary, Tag/binary, Data/binary>>;
 
-serialize_packet(#text_packet{content = Content}) -> <<4, Content/binary>>;
+serialize_packet(#message_packet{nick = Nick, content = Content}) -> 
+    NickBinary = serialize_varbinary(<<Nick/binary>>),
+    <<4, NickBinary/binary, Content/binary>>;
 
 serialize_packet(#peers_packet{peers = Peers}) ->
     {PeerCount, SerializedPeers} = serialize_peers(Peers),
@@ -63,8 +65,9 @@ deserialize_packet(
 deserialize_packet(<<3, Nonce:12/binary, Tag:16/binary, Data/binary>>) ->
     {ok, #encrypted{nonce = Nonce, tag = Tag, data = Data}};
 
-deserialize_packet(<<4, Content/binary>>) ->
-    {ok, #text_packet{content = Content}};
+deserialize_packet(<<4, NickAndContent/binary>>) ->
+    {Nick, Content} = deserialize_varbinary(NickAndContent),
+    {ok, #message_packet{nick = Nick, content = Content}};
 
 deserialize_packet(<<5, PeerCount:32/big, SerializedPeers/binary>>) ->
     case deserialize_peers(PeerCount, SerializedPeers) of
@@ -114,3 +117,11 @@ deserialize_peer(<<Ip0, Ip1, Ip2, Ip3, Port:16/big, Rest/binary>>) ->
 deserialize_peer(_Data) ->
     % NOTE: The errors could be more descriptive
     {error, invalid_peer}.
+
+serialize_varbinary(Data) -> 
+    Size = byte_size(Data),
+    <<Size:32/big, Data/binary>>.
+
+deserialize_varbinary(<<Size:32/big, Data/binary>>) -> 
+    <<TargetData:Size/binary, Rest/binary>> = Data,
+    {TargetData, Rest}.

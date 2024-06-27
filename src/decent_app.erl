@@ -9,7 +9,7 @@
 
 -export([start/2, stop/1]).
 
-start(_StartType, _StartArgs) -> decent_sup:start_link().
+start(_StartType, Nick) -> decent_sup:start_link(Nick).
 
 stop(_State) -> ok.
 

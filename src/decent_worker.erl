@@ -175,10 +175,10 @@ process_public_packet(
     % TODO: handle when this is `error`
     Serialized = decent_crypto:decrypt_data(Enc, Tag, Key, Nonce),
     case decent_protocol:deserialize_packet(Serialized) of
-        {ok, #text_packet{content = Content}} -> process_text(Content, State)
+        {ok, #message_packet{nick = Nick, content = Content}} -> process_text(Nick, Content, State)
     end.
 
 
-process_text(Data, #state{ip = Ip, port = Port} = State) ->
-    io:format("\r~p: ~s~n>> ", [{Ip, Port}, Data]),
+process_text(Nick, Content, State) ->
+    io:format("\r~s: ~s~n>> ", [Nick, Content]),
     State.

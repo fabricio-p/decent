@@ -19,31 +19,36 @@ cli() ->
         =>
         [
             #{name => port, type => integer, long => "-port", short => $p},
-            #{name => address, required => false}
+            #{name => nick},
+            #{name => bootstrapper, required => false}
         ],
         handler => fun handle_cli_args/1
     }.
 
 handle_cli_args(Args) ->
     logger:set_primary_config(level, debug),
-    case decent_app:start([], []) of
-        {ok, _Pid} ->
-            Port = maps:get(port, Args, decent_server:default_port()),
-            {ok, RealPort} = decent_server:open_socket(Port),
-            io:format("listening on port ~b~n", [RealPort]),
-            State =
-                case extract_parsed_address(Args) of
-                    {ok, DstPort, DstIp} ->
-                        decent_server:connect_to(DstIp, DstPort),
-                        #state{ip = DstIp, port = DstPort};
+    case string:trim(maps:get(nick, Args, "")) of 
+        "" -> io:format("no nick specified");
+        Nick -> case decent_app:start([], unicode:characters_to_binary(Nick)) of
+            {ok, _Pid} ->
+                Port = maps:get(port, Args, decent_server:default_port()),
+                {ok, RealPort} = decent_server:open_socket(Port),
+                io:format("listening on port ~b~n", [RealPort]),
+                State =
+                    case extract_parsed_address(Args) of
+                        {ok, DstPort, DstIp} ->
+                            decent_server:connect_to(DstIp, DstPort),
+                            #state{ip = DstIp, port = DstPort};
 
-                    _ -> #state{ip = nil, port = nil}
-                end,
-            % keep the shell process running
-            loop(State);
+                        _ -> #state{ip = nil, port = nil}
+                    end,
+                % keep the shell process running
+                loop(State);
 
-        {error, Reason} -> io:format("failed to start app: ~p~n", [Reason])
-    end.
+            {error, Reason} -> io:format("failed to start app: ~p~n", [Reason])
+        end
+    end.        
+    
 
 
 loop(State) ->
@@ -51,7 +56,7 @@ loop(State) ->
         eof -> ok;
 
         Line ->
-            Message = list_to_binary(string:trim(Line)),
+            Message = unicode:characters_to_binary(string:trim(Line)),
             Length = string:length(Message),
             if
                 Length =/= 0 -> decent_server:send_message(Message);
@@ -62,7 +67,7 @@ loop(State) ->
 
 
 extract_parsed_address(Args) ->
-    case maps:get(address, Args, nil) of
+    case maps:get(bootstrapper, Args, nil) of
         nil -> {error, nil};
 
         AddrStr ->

@@ -11,7 +11,7 @@
 
 %% callback for starting the process.
 
--export([start_link/0]).
+-export([start_link/1]).
 
 %% process interface functions.
 
@@ -34,14 +34,7 @@
 
 %% INTERFACE -------------------------------------------------------------------
 
-start_link() ->
-    case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
-        {ok, Pid} ->
-            % process_flag(Pid, message_queue_data, off_heap),
-            {ok, Pid};
-
-        Error -> Error
-    end.
+start_link(Nick) -> gen_server:start_link({local, ?MODULE}, ?MODULE, Nick, []).
 
 -define(PORT, 4011).
 
@@ -80,6 +73,7 @@ assign_roomkey(RoomKey) -> gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
 -record(
     state,
     {
+        nick :: binary(),
         contacts = #{} :: #{contact_addr() => contact()},
         port = 0 :: inet:port_number(),
         socket = nil :: nil | inet:socket(),
@@ -90,8 +84,8 @@ assign_roomkey(RoomKey) -> gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
 
 -type state() :: #state{}.
 
--spec init(any()) -> {ok, state()}.
-init(_Args) -> {ok, #state{}}.
+-spec init(string()) -> {ok, state()}.
+init(Nick) -> {ok, #state{nick = Nick}}.
 
 %% Opens a UDP socket on the specified port
 
@@ -117,9 +111,8 @@ handle_call({seen_packet, Packet}, _From, #state{seen = Seen} = State) ->
     end.
 
 %% Sends a message to all contacts
-
-handle_cast({send_message, Content}, #state{room = {roomkey, Key}} = State) ->
-    InnerPacket = #text_packet{content = Content},
+handle_cast({send_message, Content}, #state{nick = Nick, room = {roomkey, Key}} = State) ->
+    InnerPacket = #message_packet{nick = Nick, content = Content},
     SerializedInnerPacket = decent_protocol:serialize_packet(InnerPacket),
     {Nonce, Enc, Tag} = decent_crypto:encrypt_data(SerializedInnerPacket, Key),
     Packet = #encrypted{nonce = Nonce, tag = Tag, data = Enc},
