@@ -54,7 +54,7 @@ loop(State) ->
             Message = list_to_binary(string:trim(Line)),
             Length = string:length(Message),
             if
-                Length =/= 0 -> decent_server:send_data(Message);
+                Length =/= 0 -> decent_server:send_message(Message);
                 true -> nil
             end,
             loop(State)

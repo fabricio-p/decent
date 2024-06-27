@@ -48,7 +48,7 @@ handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
     logger:debug(
         #{
             from => {Ip, Port},
-            in => {decent_worker, process_packet, 2},
+            in => {decent_worker, try_process_private_packet, 2},
             packet => Packet
         }
     ),
@@ -56,28 +56,46 @@ handle_cast(try_connect, #state{ip = Ip, port = Port} = State) ->
     decent_server:send_data(Data, Ip, Port),
     {noreply, State#state{key = {pair, Pub, Priv}}};
 
+%% We're in a room, be extra cautious with packets
+%% Check if we've seen this packet before; if so, do nothing
+handle_cast({handle_packet, Packet}, #state{key = {roomkey, _}} = State) ->
+    case decent_server:seen_packet(Packet) of
+        true -> {noreply, State};
+        false -> handle_packet_impl(Packet, State)
+    end;
+
 %% We received a packet, process it
 handle_cast({handle_packet, Packet}, State) ->
-    NewState =
-        case decent_protocol:deserialize_packet(Packet) of
-            {ok, Data} -> process_packet(Data, State)
-        end,
-    {noreply, NewState}.
+    handle_packet_impl(Packet, State).
 
 %% Terminates the worker
 
 terminate(_Reason, _State) -> nil.
 
+handle_packet_impl(Packet, State) ->
+    NewState =
+        case decent_protocol:deserialize_packet(Packet) of
+            {ok, Data} ->
+                case try_process_private_packet(Data, State) of
+                    next ->
+                        decent_server:send_data(Packet),
+                        process_public_packet(Data, State);
+
+                    S -> S
+                end
+        end,
+    {noreply, NewState}.
+
 %% We're creating the room key since one doesn't exist yet
 
-process_packet(
+try_process_private_packet(
     #handshake_req{key = OtherPub} = ReceivedPacket,
     #state{ip = Ip, port = Port, key = nil} = State
 ) ->
     logger:debug(
         #{
             from => {Ip, Port},
-            in => {decent_worker, process_packet, 2},
+            in => {decent_worker, try_process_private_packet, 2},
             packet => ReceivedPacket,
             key => nil
         }
@@ -91,14 +109,14 @@ process_packet(
     State#state{key = {roomkey, Shared}};
 
 %% We already have a room key so we encrypt it with the shared key and send it
-process_packet(
+try_process_private_packet(
     #handshake_req{key = OtherPub} = ReceivedPacket,
     #state{ip = Ip, port = Port, key = {roomkey, RoomKey}} = State
 ) ->
     logger:debug(
         #{
             from => {Ip, Port},
-            in => {decent_worker, process_packet, 2},
+            in => {decent_worker, try_process_private_packet, 2},
             packet => ReceivedPacket,
             key => {roomkey, RoomKey}
         }
@@ -116,19 +134,23 @@ process_packet(
     State;
 
 %% Acknowledged, the shared key will become the room key
-process_packet(
+try_process_private_packet(
     #handshake_ack{key = OtherPub},
     #state{ip = Ip, port = Port, key = {pair, _MyPub, MyPriv}} = State
 ) ->
     RoomKey = decent_crypto:compute_shared_key(OtherPub, MyPriv),
-    logger:debug(#{from => {Ip, Port},
-                   in => {decent_worker, process_packet, 2},
-                   roomkey => RoomKey}),
+    logger:debug(
+        #{
+            from => {Ip, Port},
+            in => {decent_worker, try_process_private_packet, 2},
+            roomkey => RoomKey
+        }
+    ),
     decent_server:assign_roomkey(RoomKey),
     State#state{key = {roomkey, RoomKey}};
 
 %% Acknowledged, we received an encrypted room key
-process_packet(
+try_process_private_packet(
     #handshake_ack_roomkey{
         key = OtherPub,
         roomkey = #encrypted{nonce = Nonce, tag = Tag, data = Enc}
@@ -142,8 +164,11 @@ process_packet(
     decent_server:assign_roomkey(RoomKey),
     State#state{key = {roomkey, RoomKey}};
 
+try_process_private_packet(_Packet, _State) -> next.
+
 %% We received an encrypted message
-process_packet(
+
+process_public_packet(
     #encrypted{nonce = Nonce, tag = Tag, data = Enc},
     #state{key = {roomkey, Key}} = State
 ) ->
