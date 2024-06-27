@@ -1,7 +1,16 @@
 -module(decent_crypto).
 
 -export(
-    [generate_ecdh_key_pair/0, generate_key_pair/0, encrypt/2, decrypt/4, sign/2, verify/3, hash/1, compute_shared_key/2]
+    [
+        generate_ecdh_key_pair/0,
+        generate_key_pair/0,
+        encrypt/2,
+        decrypt/4,
+        sign/2,
+        verify/3,
+        hash/1,
+        compute_shared_key/2
+    ]
 ).
 
 -define(AEAD_CIPHER, chacha20_poly1305).
@@ -23,6 +32,7 @@ encrypt(Data, Key) ->
         crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Data, [], true),
     {Nonce, Enc, Tag}.
 
+
 -spec decrypt(binary(), binary(), binary(), binary()) -> binary().
 decrypt(Enc, Tag, Key, Nonce) ->
     crypto:crypto_one_time_aead(?AEAD_CIPHER, Key, Nonce, Enc, [], Tag, false).
@@ -33,7 +43,13 @@ sign(Digest, PrivKey) ->
 
 -spec verify(iodata(), binary(), crypto:eddsa_public()) -> boolean().
 verify(Digest, Signature, PubKey) ->
-    crypto:verify(?SIGN_ALG, none, {digest, Digest}, Signature, [PubKey, ?ED_CURVE]).
+    crypto:verify(
+        ?SIGN_ALG,
+        none,
+        {digest, Digest},
+        Signature,
+        [PubKey, ?ED_CURVE]
+    ).
 
 -spec hash(iodata()) -> binary().
 hash(Data) -> crypto:hash(?DIGEST_TYPE, Data).

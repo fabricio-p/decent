@@ -169,7 +169,11 @@ try_process_private_packet(_Packet, _State) -> next.
 %% We received an encrypted message
 
 process_public_packet(
-    #signed {pubkey = OtherPub, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}},
+    #signed{
+        pubkey = OtherPub,
+        signature = Signature,
+        data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}
+    },
     #state{key = {roomkey, Key}} = State
 ) ->
     % TODO: handle when this is `error`
@@ -182,7 +186,7 @@ process_public_packet(
     end.
 
 
-process_text(Nick, <<Checksum:32, _/binary>>, Content, State) ->
+process_text(Nick, <<Checksum : 32, _/binary>>, Content, State) ->
     ChecksumString = string:to_lower(io_lib:format("~7.16B", [Checksum bsr 4])),
     io:format("\r~s [~s]: ~s~n>> ", [Nick, ChecksumString, Content]),
     State.

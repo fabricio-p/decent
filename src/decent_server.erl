@@ -86,7 +86,8 @@ assign_roomkey(RoomKey) -> gen_server:cast(?MODULE, {assign_roomkey, RoomKey}).
 -type state() :: #state{}.
 
 -spec init(string()) -> {ok, state()}.
-init(Nick) -> {ok, #state{nick = Nick, sigkey = decent_crypto:generate_key_pair()}}.
+init(Nick) ->
+    {ok, #state{nick = Nick, sigkey = decent_crypto:generate_key_pair()}}.
 
 %% Opens a UDP socket on the specified port
 
@@ -122,7 +123,12 @@ handle_cast(
     HashedMessage = decent_crypto:hash(SerializedInnerPacket),
     Signature = decent_crypto:sign(HashedMessage, MyPriv),
     {Nonce, Enc, Tag} = decent_crypto:encrypt(SerializedInnerPacket, Key),
-    Packet = #signed{pubkey = MyPub, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}},
+    Packet =
+        #signed{
+            pubkey = MyPub,
+            signature = Signature,
+            data = #encrypted{nonce = Nonce, tag = Tag, data = Enc}
+        },
     SerializedPacket = decent_protocol:serialize_packet(Packet),
     send_to_all(SerializedPacket, State),
     {noreply, State};

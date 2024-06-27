@@ -23,9 +23,21 @@
 -export_type([handshake_req/0, handshake_ack/0, encrypted/0]).
 
 -spec serialize_packet(raw_packet()) -> binary().
-
-serialize_packet(#signed{pubkey = PubKey, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Data}}) ->
-    <<0, PubKey/binary, Signature/binary, Nonce/binary, Tag/binary, Data/binary>>;
+serialize_packet(
+    #signed{
+        pubkey = PubKey,
+        signature = Signature,
+        data = #encrypted{nonce = Nonce, tag = Tag, data = Data}
+    }
+) ->
+    <<
+        0,
+        PubKey/binary,
+        Signature/binary,
+        Nonce/binary,
+        Tag/binary,
+        Data/binary
+    >>;
 
 serialize_packet(#handshake_req{key = Key}) -> <<10, Key/binary>>;
 serialize_packet(#handshake_ack{key = Key}) -> <<11, Key/binary>>;
@@ -46,11 +58,27 @@ serialize_packet(#peers_packet{peers = Peers}) ->
     {PeerCount, SerializedPeers} = serialize_peers(Peers),
     <<14, PeerCount:32/big, SerializedPeers/binary>>.
 
+
 -spec deserialize_packet(binary()) ->
     {ok, raw_packet()} | {error, Reason} when Reason :: invalid.
-
-deserialize_packet(<<0, PubKey:32/binary, Signature:64/binary, Nonce:12/binary, Tag:16/binary, Data/binary>>) ->
-    {ok, #signed{pubkey = PubKey, signature = Signature, data = #encrypted{nonce = Nonce, tag = Tag, data = Data}}};
+deserialize_packet(
+    <<
+        0,
+        PubKey:32/binary,
+        Signature:64/binary,
+        Nonce:12/binary,
+        Tag:16/binary,
+        Data/binary
+    >>
+) ->
+    {
+        ok,
+        #signed{
+            pubkey = PubKey,
+            signature = Signature,
+            data = #encrypted{nonce = Nonce, tag = Tag, data = Data}
+        }
+    };
 
 deserialize_packet(<<10, Data/binary>>) -> {ok, #handshake_req{key = Data}};
 deserialize_packet(<<11, Data/binary>>) -> {ok, #handshake_ack{key = Data}};
@@ -77,6 +105,7 @@ deserialize_packet(<<14, PeerCount:32/big, SerializedPeers/binary>>) ->
     end;
 
 deserialize_packet(_Data) -> {error, invalid}.
+
 
 serialize_peers(Peers) -> serialize_peers(Peers, 0, <<>>).
 
