@@ -111,7 +111,11 @@ handle_call({seen_packet, Packet}, _From, #state{seen = Seen} = State) ->
     end.
 
 %% Sends a message to all contacts
-handle_cast({send_message, Content}, #state{nick = Nick, room = {roomkey, Key}} = State) ->
+
+handle_cast(
+    {send_message, Content},
+    #state{nick = Nick, room = {roomkey, Key}} = State
+) ->
     InnerPacket = #message_packet{nick = Nick, content = Content},
     SerializedInnerPacket = decent_protocol:serialize_packet(InnerPacket),
     {Nonce, Enc, Tag} = decent_crypto:encrypt_data(SerializedInnerPacket, Key),

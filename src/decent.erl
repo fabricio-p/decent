@@ -27,28 +27,30 @@ cli() ->
 
 handle_cli_args(Args) ->
     logger:set_primary_config(level, debug),
-    case string:trim(maps:get(nick, Args, "")) of 
+    case string:trim(maps:get(nick, Args, "")) of
         "" -> io:format("no nick specified");
-        Nick -> case decent_app:start([], unicode:characters_to_binary(Nick)) of
-            {ok, _Pid} ->
-                Port = maps:get(port, Args, decent_server:default_port()),
-                {ok, RealPort} = decent_server:open_socket(Port),
-                io:format("listening on port ~b~n", [RealPort]),
-                State =
-                    case extract_parsed_address(Args) of
-                        {ok, DstPort, DstIp} ->
-                            decent_server:connect_to(DstIp, DstPort),
-                            #state{ip = DstIp, port = DstPort};
 
-                        _ -> #state{ip = nil, port = nil}
-                    end,
-                % keep the shell process running
-                loop(State);
+        Nick ->
+            case decent_app:start([], unicode:characters_to_binary(Nick)) of
+                {ok, _Pid} ->
+                    Port = maps:get(port, Args, decent_server:default_port()),
+                    {ok, RealPort} = decent_server:open_socket(Port),
+                    io:format("listening on port ~b~n", [RealPort]),
+                    State =
+                        case extract_parsed_address(Args) of
+                            {ok, DstPort, DstIp} ->
+                                decent_server:connect_to(DstIp, DstPort),
+                                #state{ip = DstIp, port = DstPort};
 
-            {error, Reason} -> io:format("failed to start app: ~p~n", [Reason])
-        end
-    end.        
-    
+                            _ -> #state{ip = nil, port = nil}
+                        end,
+                    % keep the shell process running
+                    loop(State);
+
+                {error, Reason} ->
+                    io:format("failed to start app: ~p~n", [Reason])
+            end
+    end.
 
 
 loop(State) ->

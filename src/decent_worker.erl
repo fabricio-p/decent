@@ -175,7 +175,8 @@ process_public_packet(
     % TODO: handle when this is `error`
     Serialized = decent_crypto:decrypt_data(Enc, Tag, Key, Nonce),
     case decent_protocol:deserialize_packet(Serialized) of
-        {ok, #message_packet{nick = Nick, content = Content}} -> process_text(Nick, Content, State)
+        {ok, #message_packet{nick = Nick, content = Content}} ->
+            process_text(Nick, Content, State)
     end.
 
 

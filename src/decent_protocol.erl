@@ -37,7 +37,7 @@ serialize_packet(
 serialize_packet(#encrypted{nonce = Nonce, tag = Tag, data = Data}) ->
     <<3, Nonce/binary, Tag/binary, Data/binary>>;
 
-serialize_packet(#message_packet{nick = Nick, content = Content}) -> 
+serialize_packet(#message_packet{nick = Nick, content = Content}) ->
     NickBinary = serialize_varbinary(<<Nick/binary>>),
     <<4, NickBinary/binary, Content/binary>>;
 
@@ -118,10 +118,12 @@ deserialize_peer(_Data) ->
     % NOTE: The errors could be more descriptive
     {error, invalid_peer}.
 
-serialize_varbinary(Data) -> 
+
+serialize_varbinary(Data) ->
     Size = byte_size(Data),
     <<Size:32/big, Data/binary>>.
 
-deserialize_varbinary(<<Size:32/big, Data/binary>>) -> 
+
+deserialize_varbinary(<<Size:32/big, Data/binary>>) ->
     <<TargetData:Size/binary, Rest/binary>> = Data,
     {TargetData, Rest}.
